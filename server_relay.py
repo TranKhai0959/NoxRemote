@@ -5,25 +5,44 @@ import json
 import logging
 import http
 import websockets
-from typing import Dict, Optional
+from typing import Dict, Any, Optional
 
 logging.basicConfig(level=logging.INFO, format="[%(asctime)s] [RelayServer] %(message)s")
 logger = logging.getLogger("NoxRelay")
 
-# Connected peers: device_id -> WebSocketServerProtocol
-peers: Dict[str, any] = {}
+# Connected peers: device_id -> WebSocket
+peers: Dict[str, Any] = {}
 # Active sessions: ws -> partner_ws
-rooms: Dict[any, any] = {}
+rooms: Dict[Any, Any] = {}
 
-async def process_request(connection, request):
-    """Handles HTTP GET requests (Health checks & UptimeRobot pings to keep 24/7 online)."""
-    # If client is requesting a normal web page or health check (not WebSocket handshake)
-    upgrade = request.headers.get("Upgrade", "").lower()
-    if upgrade != "websocket" and request.path in ("/", "/health", "/healthz", "/ping"):
-        html_content = (
+async def process_request(*args):
+    """
+    Universal HTTP Health Check handler compatible with all versions of websockets:
+    - websockets >= 13.0: process_request(connection, request)
+    - websockets < 13.0:  process_request(path, request_headers)
+    """
+    conn = None
+    if len(args) == 2:
+        arg1, arg2 = args[0], args[1]
+        if isinstance(arg1, str):
+            # Legacy: (path: str, headers: Headers)
+            path = arg1
+            upgrade = arg2.get("Upgrade", "").lower() if hasattr(arg2, "get") else ""
+        else:
+            # Modern: (connection: ServerConnection, request: Request)
+            conn = arg1
+            path = getattr(arg2, "path", "/")
+            headers = getattr(arg2, "headers", {})
+            upgrade = headers.get("Upgrade", "").lower() if hasattr(headers, "get") else ""
+    else:
+        return None
+
+    # If it's a regular HTTP request (Browser visit, UptimeRobot, Render Health Check)
+    if upgrade != "websocket" and path in ("/", "/health", "/healthz", "/ping"):
+        body_text = (
             "<!DOCTYPE html>"
             "<html>"
-            "<head><title>NoxRemote Relay Server</title></head>"
+            "<head><meta charset='utf-8'><title>NoxRemote Relay Server</title></head>"
             "<body style='font-family: -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, sans-serif; background: #0f172a; color: #f8fafc; text-align: center; padding-top: 80px;'>"
             "<div style='display:inline-block; background: #1e293b; padding: 30px 50px; border-radius: 16px; border: 1px solid #38bdf8; box-shadow: 0 10px 25px rgba(0,0,0,0.5);'>"
             "<h1 style='color: #38bdf8; margin-bottom: 10px;'>&#9989; NoxRemote Relay Server is ONLINE</h1>"
@@ -33,14 +52,31 @@ async def process_request(connection, request):
             "</body>"
             "</html>"
         )
-        return connection.respond(
-            http.HTTPStatus.OK,
-            [
-                ("Content-Type", "text/html; charset=utf-8"),
-                ("Access-Control-Allow-Origin", "*"),
-            ],
-            html_content.encode("utf-8")
-        )
+        
+        # Modern websockets (ServerConnection.respond takes status and text)
+        if conn is not None and hasattr(conn, "respond"):
+            try:
+                resp = conn.respond(http.HTTPStatus.OK, body_text)
+                # In modern websockets, headers can be updated or left as default text
+                try:
+                    del resp.headers["Content-Type"]
+                    resp.headers["Content-Type"] = "text/html; charset=utf-8"
+                except Exception:
+                    pass
+                return resp
+            except Exception as e:
+                logger.debug(f"conn.respond fallback: {e}")
+
+        # Legacy websockets: return (status, headers, body_bytes) tuple
+        body_bytes = body_text.encode("utf-8")
+        headers = [
+            ("Content-Type", "text/html; charset=utf-8"),
+            ("Content-Length", str(len(body_bytes))),
+            ("Connection", "close"),
+        ]
+        return (http.HTTPStatus.OK, headers, body_bytes)
+
+    # Return None to allow WebSocket handshake to proceed
     return None
 
 async def handle_client(websocket):
