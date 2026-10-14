@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: noxremote-relay
+    env: python
+    region: oregon
+    plan: free
+    buildCommand: pip install websockets
+    startCommand: python server_relay.py
+    autoDeploy: true
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+
